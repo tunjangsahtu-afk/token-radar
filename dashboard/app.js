@@ -1,33 +1,53 @@
-// Token Radar's dashboard (model radar-2). It reads window.RADAR (written beside dashboard/ by
-// main.ts) and renders the ranked board, a filterable table, a per-protocol detail drawer with the
-// model's own inputs and the protocol's farm plan. No network: every byte it shows is in data.js.
+// Token Radar dashboard (model radar-2). It reads window.RADAR, the dataset
+// main.ts writes beside dashboard/ as data.js, and renders the ranked board,
+// its filters, and a per-protocol detail drawer showing the model's own
+// inputs and the protocol's farm plan. Nothing here fetches anything: every
+// byte on screen comes from data.js, so the page works with no network.
 //
-// The board ranks 178 protocols: the whole 40-protocol watchlist plus every other protocol that
-// passes the watchlist's own test below the $50M floor (138 early rows). A protocol is ranked only
-// when it records no token AND is not a wrapped, staked or bridged product of a token that already
-// trades: no Bridge / Canonical Bridge / Liquid Staking / Liquid Restaking / Restaked BTC / CEX
-// category, no whole word wrapped, staked or staking in its name, no exchange's name at the start
-// of its name, and no version marker (V2, v2, 2.0) at the end of it. Of the 342 pre-token records
-// in the snapshot, 144 fail that test and 20 more sit above the floor without being on the
-// watchlist (the snapshot does not say why the house left them out, so this radar does not rank
-// them either); both groups are counted in the Set aside panel, never silently dropped.
+// What is ranked: 178 protocols — the whole 40-protocol watchlist plus every
+// other protocol that passes the watchlist's own test below the $50M floor
+// (138 early rows). A protocol is ranked only when it records no token AND is
+// not a wrapped, staked or bridged product of a token that already trades:
+// no Bridge / Canonical Bridge / Liquid Staking / Liquid Restaking /
+// Restaked BTC / CEX category, no whole word wrapped, staked or staking in
+// its name, no exchange's name at the start of its name, and no version
+// marker (V2, v2, 2.0) at the end of it. Of the 342 pre-token records in the
+// snapshot, 144 fail that test and 20 more sit above the floor without being
+// on the watchlist (the snapshot does not say why the house left them out, so
+// this radar does not rank them either); both groups are counted in the
+// Set aside panel, never silently dropped.
 //
-// Implied value, one function for every row:
+// Implied value, the same function for every row:
 //   implied = round( tvl_usd x 0.25 x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)
 //                     x (0.6 + min(age_days, 1095) / 1095 x 0.4) x (1 + 0.02 x min(chains, 5)) )
-// TVL is the size, seven-day growth is the momentum, age with no token is the maturity, and the
-// chain count is the diversification: a protocol live on several chains has a broader surface to
-// launch from. An age the snapshot does not record uses 365 days. Implied value is a model, not a
-// promise, and "records no token" is what the snapshot says, never a claim that it has none.
+// TVL is the size, seven-day growth is the momentum, age with no token is the
+// maturity, and the chain count is the diversification: a protocol live on
+// several chains has a broader surface to launch from. An age the snapshot
+// does not record uses 365 days. Implied value is a model, not a promise,
+// and "records no token" is what the snapshot says, never a claim that it
+// has none.
 (function () {
   'use strict';
 
   var DATA = window.RADAR;
   if (!DATA) return;
+
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', chain: 'all', scope: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = {
+    q: '',
+    category: 'all',
+    chain: 'all',
+    scope: 'all',
+    tab: 'pre-token',
+    sort: 'implied',
+    dir: -1,
+    selected: null
+  };
+
+  // --- Number formatting ---------------------------------------------------
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+
   function fmtUsd(n) {
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
     if (Math.abs(n) >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
@@ -35,63 +55,85 @@
     if (Math.abs(n) >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
     return usd.format(n);
   }
+
   function fmtPct(n) {
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
     return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
   }
+
   function fmtAge(days) {
     if (days === null || days === undefined) return 'unknown';
     if (days >= 365) return (days / 365).toFixed(1) + 'y';
     return Math.max(0, Math.round(days)) + 'd';
   }
-  // The model in one function: the page recomputes a row from the snapshot figures and checks the
-  // number board.json carries, so the page's code and the board's data are visibly the same arithmetic.
+
+  // The model, recomputed in the page: a row is scored from its snapshot
+  // figures and checked against the number board.json carries, so the page's
+  // code and the board's data are visibly the same arithmetic.
   function impliedOf(row, model) {
-    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
+    var rawGrowth = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
+    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
     var growthMult = 1 + (growth / 100) * model.growth_weight;
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-    var chains = row.chains ? row.chains.length : 0;
-    var diversify = 1 + model.diversification_per_chain * Math.min(chains, model.diversification_max_chains);
+    var chainCount = row.chains ? row.chains.length : 0;
+    var diversify = 1 + model.diversification_per_chain * Math.min(chainCount, model.diversification_max_chains);
     return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity * diversify));
   }
+
+  // --- A tiny DOM helper ---------------------------------------------------
+  // el('div', { class: 'x', text: 'hi' }, child1, child2, ...)
+  // Attributes starting with "on" become event listeners; "class", "text"
+  // and "html" are handled specially; everything else is set as an attribute.
 
   function el(tag, attrs) {
     var node = document.createElement(tag);
     if (attrs) {
-      Object.keys(attrs).forEach(function (k) {
-        if (k === 'class') node.className = attrs[k];
-        else if (k === 'text') node.textContent = attrs[k];
-        else if (k === 'html') node.innerHTML = attrs[k];
-        else if (k.slice(0, 2) === 'on') node.addEventListener(k.slice(2), attrs[k]);
-        else if (attrs[k] !== null && attrs[k] !== undefined) node.setAttribute(k, attrs[k]);
+      Object.keys(attrs).forEach(function (key) {
+        if (key === 'class') node.className = attrs[key];
+        else if (key === 'text') node.textContent = attrs[key];
+        else if (key === 'html') node.innerHTML = attrs[key];
+        else if (key.slice(0, 2) === 'on') node.addEventListener(key.slice(2), attrs[key]);
+        else if (attrs[key] !== null && attrs[key] !== undefined) node.setAttribute(key, attrs[key]);
       });
     }
     for (var i = 2; i < arguments.length; i++) {
       var child = arguments[i];
       if (child === null || child === undefined) continue;
-      if (Array.isArray(child)) child.forEach(function (c) { if (c) node.appendChild(c); });
-      else if (typeof child === 'string') node.appendChild(document.createTextNode(child));
-      else node.appendChild(child);
+      if (Array.isArray(child)) {
+        child.forEach(function (c) { if (c) node.appendChild(c); });
+      } else if (typeof child === 'string') {
+        node.appendChild(document.createTextNode(child));
+      } else {
+        node.appendChild(child);
+      }
     }
     return node;
   }
 
-  // The farm plan is the same derivation main.ts writes to board.json: category, chains, TVL and age
-  // decide the action, the capital, the hold and every cost and time. No name is special-cased.
-  function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
+  // --- Farm plans -----------------------------------------------------------
+  // The same derivation main.ts writes into board.json: category, chains, TVL
+  // and age decide the action, the capital, the hold and every cost and time.
+  // No protocol name is special-cased.
+
+  function firstChain(p) {
+    return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain';
+  }
+
   function capitalFor(p) {
     if (p.tvl_usd >= 5e9) return 250;
     if (p.tvl_usd >= 1e9) return 150;
     if (p.tvl_usd >= 1e8) return 100;
     return 50;
   }
+
   function holdDaysFor(age) {
     if (age === null || age === undefined) return 30;
     if (age < 180) return 60;
     if (age < 365) return 45;
     return 30;
   }
+
   function actionFor(p, capital, chain) {
     var c = (p.category || '').toLowerCase();
     var name = p.name;
@@ -109,12 +151,14 @@
     if (c.indexOf('insurance') >= 0) return 'Buy $' + capital + ' of cover from ' + name + ' on ' + chain + ' and keep the policy.';
     return 'Deposit $' + capital + ' of USDC into ' + name + ' on ' + chain + ' and keep the position open.';
   }
+
   function stepText(step) {
     var s = step.text + ' Cost: ' + step.cost + '. Time: ' + step.time + '.';
     if (s.length > 600) s = s.slice(0, 596) + '...';
     if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
     return s;
   }
+
   function weeklyActionFor(p) {
     var c = (p.category || '').toLowerCase();
     if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'a small borrow or a top-up of the supply position';
@@ -126,6 +170,7 @@
     if (c.indexOf('governance') >= 0) return 'one governance vote';
     return 'a deposit, a swap or a vote';
   }
+
   function riskFor(p) {
     var c = (p.category || '').toLowerCase();
     if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'a sharp price move can liquidate a borrow, so keep the position well collateralised';
@@ -136,8 +181,12 @@
     if (c.indexOf('stable') >= 0) return 'a stable asset can depeg, so watch its peg before adding funds';
     return 'a smart-contract bug can freeze funds, so farm only what you can afford to lose';
   }
+
+  // Seven steps per protocol: a fresh wallet, the opening action, a weekly
+  // qualifying action, a points-program check, the hold, the risk, and the
+  // claim step with a farm log.
   function farmSteps(p) {
-    var chain = chainOf(p);
+    var chain = firstChain(p);
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
     return [
@@ -151,6 +200,10 @@
     ].map(stepText);
   }
 
+  // --- State in the URL hash ------------------------------------------------
+  // Filters and the open detail are reflected in #q=…&p=… so a board view is
+  // shareable and survives a reload.
+
   function readHash() {
     var hash = window.location.hash.replace(/^#/, '');
     if (!hash) return;
@@ -161,6 +214,7 @@
     if (params.get('chain')) state.chain = params.get('chain');
     if (params.get('scope')) state.scope = params.get('scope');
   }
+
   function writeHash() {
     var params = new URLSearchParams();
     if (state.q) params.set('q', state.q);
@@ -173,7 +227,9 @@
     else window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 
-  function rows() {
+  // --- Filtering and sorting -----------------------------------------------
+
+  function visibleRows() {
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
       if (state.category !== 'all' && r.category !== state.category) return false;
@@ -185,6 +241,7 @@
       return hay.indexOf(q) >= 0;
     });
   }
+
   function sortedRows(list) {
     var key = state.sort;
     return list.slice().sort(function (a, b) {
@@ -199,6 +256,8 @@
       return a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
     });
   }
+
+  // --- Page sections ---------------------------------------------------------
 
   function header() {
     return el('header', { class: 'top' },
@@ -228,7 +287,8 @@
     );
   }
 
-  // The five strongest rows at a glance: the reader's first answer is which protocol to farm next.
+  // The five strongest rows at a glance: the reader's first answer is which
+  // protocol to farm next.
   function spotlight() {
     var top = DATA.rows.slice(0, 5);
     var max = top[0] ? top[0].implied_value_usd : 1;
@@ -248,7 +308,8 @@
     );
   }
 
-  // What the board leaves out, counted and explained: a radar that hides its exclusions is not one a reader can trust.
+  // What the board leaves out, counted and explained: a radar that hides its
+  // exclusions is not one a reader can trust.
   function setAside() {
     var ex = DATA.excluded || { wrapped_staked: 0, bridge: 0, exchange: 0, versioned: 0 };
     var other = DATA.pre_token_total - DATA.board_size - ex.wrapped_staked - ex.bridge - ex.exchange - ex.versioned;
@@ -294,7 +355,7 @@
       el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chainSelect),
       el('div', { class: 'field' }, el('label', { for: 'scope', text: 'Scope' }), scopeSelect),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
+      el('span', { class: 'count', text: state.tab === 'pre-token' ? visibleRows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
     );
   }
 
@@ -308,7 +369,7 @@
   }
 
   function boardTable() {
-    var list = sortedRows(rows());
+    var list = sortedRows(visibleRows());
     if (list.length === 0) {
       return el('div', { class: 'panel' }, el('div', { class: 'empty' },
         el('h2', { text: 'No protocol matches that filter' }),
@@ -397,6 +458,8 @@
     );
   }
 
+  // --- Detail drawer ---------------------------------------------------------
+
   var dialog = el('dialog', { class: 'detail', id: 'detail', 'aria-labelledby': 'detail-title' });
   dialog.addEventListener('close', function () { state.selected = null; writeHash(); });
 
@@ -445,6 +508,8 @@
       dialog.setAttribute('open', '');
     }
   }
+
+  // --- Render and boot -------------------------------------------------------
 
   function render() {
     app.textContent = '';
